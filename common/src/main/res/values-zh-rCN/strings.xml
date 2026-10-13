@@ -388,6 +388,7 @@
     <string name="use_usage_content_type_routing_instead_of_stream_type">使用 usage / content-type 路由代替流类型</string>
     <string name="use_your_last_connection_type_and_selected_iphone">使用上次的连接方式和已选 iPhone。</string>
     <string name="vpn_consent_was_denied">VPN 授权被拒绝</string>
+    <string name="vpn_consent_launch_failed">VPN 授权窗口不可用，正在尝试直接连接</string>
     <string name="vpn_consent_unavailable">此车机无法授予 VPN 权限（系统 VPN 确认组件缺失）。有线 CarPlay 需要 VPN，请检查系统更新或更换 ROM。</string>
     <string name="waiting_for_iphone_over_usb">正在等待 USB 连接的 iPhone</string>
     <string name="waiting_for_mfi_coprocessor">正在等待 MFi 协处理器</string>
@@ -724,4 +725,8 @@
     <string name="report_usb_copy_paths">另外保存到：\n%1$s</string>
     <string name="settings_harman_fullscreen_experimental">哈曼车机全屏（实验性）</string>
     <string name="settings_harman_fullscreen_experimental_description">让 CarPlay 占用受支持哈曼车机的原厂侧栏区域。下次打开 CarPlay 窗口时生效；其他固件可能显示异常。</string>
+    <string name="usb_bt_dongle_status">USB 蓝牙 dongle</string>
+    <string name="usb_bt_dongle_connected">USB 蓝牙 dongle 已连接（%1$s）</string>
+    <string name="usb_bt_dongle_not_found">未发现 USB 蓝牙 dongle——请插入一个</string>
+    <string name="usb_bt_dongle_permission_needed">点击授权 USB 蓝牙 dongle 的 USB 权限</string>
 </resources>
