@@ -36,6 +36,13 @@ class Ipv6NcmBridge(
      * querying and never opens TCP/7000. Null disables the interception.
      */
     @Volatile var mdnsResponder: WiredMdnsResponder? = null,
+    /**
+     * User-space TCP terminator (T3 wired kernel bypass). When attached, TCP segments addressed
+     * to the wired link-local are answered and relayed in-process; the 4.4 kernel never sees
+     * them (issues #133/#152/#168: the kernel silently drops the iPhone's SYN). Null keeps the
+     * legacy TUN path.
+     */
+    @Volatile var userSpaceTcp: UserSpaceTcpStack? = null,
 ) : Closeable {
     init {
         require(hostMac.size == EthernetIpv6Codec.MAC_BYTES) { "hostMac must be 6 bytes" }
@@ -81,6 +88,7 @@ class Ipv6NcmBridge(
     private var tunInjectLogBudget = 8
     @Volatile
     private var lastNaTimeNanos = 0L
+    private val ustcpHandledLogged = AtomicBoolean(false)
     private val running = AtomicBoolean(false)
     private lateinit var ncmToTunThread: Thread
     private lateinit var tunToNcmThread: Thread
@@ -114,6 +122,7 @@ class Ipv6NcmBridge(
         // CarPlayVpnService.onDestroy().
         join(ncmToTunThread)
         join(tunToNcmThread)
+        userSpaceTcp?.close()
     }
 
     private fun runNcmToTun() {
@@ -210,10 +219,27 @@ class Ipv6NcmBridge(
                     runCatching { onDebugLog("ncm inbound diag ${frame.diagnosticSummary(ipv6.payloadOffset)}") }
                 }
                 val isTcp = inboundNextHeader == 6
+                // User-space TCP: terminate in-process and relay to the AirPlay listener over
+                // loopback instead of injecting into the kernel (T3 SYN black hole bypass).
+                val stack = userSpaceTcp
+                if (isTcp && stack != null && stack.onInboundPacket(
+                        frame.copyOfRange(ipv6.payloadOffset, ipv6.payloadOffset + ipv6.payloadLength),
+                        ipv6.sourceMac,
+                    )
+                ) {
+                    if (ustcpHandledLogged.compareAndSet(false, true)) {
+                        val msg = "WIRED-CHAIN [16/16] TCP handled by user-space stack (kernel bypass)"
+                        Log.i(TAG, msg)
+                        runCatching { onDebugLog(msg) }
+                    }
+                    continue
+                }
                 if (isTcp) {
+                    // Counts only packets that actually cross into the kernel TUN (packets the
+                    // user-space stack consumed are skipped above, keeping the diagnostic honest).
                     val tcpCount = injectedTcpPackets.incrementAndGet()
                     if (tcpCount == 1) {
-                        val tcpMsg = "WIRED-CHAIN [16/16] first TCP packet injected to TUN (iPhone -> 7000)"
+                        val tcpMsg = "WIRED-CHAIN [16/16] first inbound TCP packet injected to TUN"
                         Log.i(TAG, tcpMsg)
                         runCatching { onDebugLog(tcpMsg) }
                     }

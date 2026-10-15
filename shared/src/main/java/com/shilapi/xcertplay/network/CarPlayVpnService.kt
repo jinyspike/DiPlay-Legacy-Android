@@ -21,6 +21,7 @@ import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.io.IOException
+import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -214,6 +215,24 @@ class CarPlayVpnService : VpnService() {
             runCatching { listener.onDebugLog("wired VPN TUN established address=$linkLocal mtu=$TUN_MTU") }
             if (realSdkInt() < 21) LegacyTunBlocking.enable(tunFd)
 
+            // User-space TCP stack (T3 wired kernel bypass): terminates the iPhone's TCP in
+            // process and relays it into the AirPlay listener over loopback. Loopback first:
+            // same-host connects to the scoped TUN link-local listener are refused on some
+            // 4.4 kernels (T3, 2026-10-15 log: ECONNREFUSED on every scoped candidate) while
+            // 127.0.0.1/::1 delivery is universally reliable. The loopback listeners the
+            // candidates target are armed further below; the scoped address stays last as a
+            // belt-and-suspenders fallback for kernels that skip loopback binds.
+            val userSpaceTcp = UserSpaceTcpStack(
+                hostMac = hostMac,
+                hostLinkLocal = address.address,
+                relayCandidates = mutableListOf<InetAddress>().apply {
+                    runCatching { add(InetAddress.getByName("127.0.0.1")) }
+                    runCatching { add(InetAddress.getByName("::1")) }
+                    add(AirPlaySocketBinder.scopedLinkLocal(address))
+                },
+                sendFrame = { frame -> ncm.send(frame, 2_000) },
+                log = { line -> runCatching { listener.onDebugLog(line) } },
+            )
             val ipv6Bridge = Ipv6NcmBridge(
                 ncm = ncm,
                 tun = tunFd,
@@ -222,10 +241,12 @@ class CarPlayVpnService : VpnService() {
                 onDebugLog = { line -> runCatching { listener.onDebugLog(line) } },
                 onError = { error -> onTransportError(generation, listener, error) },
             )
+            ipv6Bridge.userSpaceTcp = userSpaceTcp
             attachStage = "NCM IPv6 bridge startup"
             ipv6Bridge.start()
             bridge = ipv6Bridge
             runCatching { listener.onDebugLog("wired NCM IPv6 bridge started") }
+            runCatching { listener.onDebugLog("ustcp stack armed (kernel TCP bypass for wired link)") }
 
             attachStage = "AirPlay listener bind"
             // Issue #133: on some vendor kernels the iPhone's TCP SYN reaches the TUN but the
@@ -273,6 +294,42 @@ class CarPlayVpnService : VpnService() {
                     }
                 }
             }.onFailure { error -> Log.w(TAG, "wired wildcard AirPlay listener unavailable", error) }
+            // USTCP relay target: arm loopback listeners the stack's relay candidates connect
+            // to (127.0.0.1 / ::1). The primary listener above is bound to the scoped TUN
+            // link-local only; same-host connects to it are refused on some 4.4 kernels
+            // (T3), so the loopback path is what actually carries the relayed AirPlay TCP.
+            // Best-effort per family: one failure must never remove the other.
+            boundPort()?.let { port ->
+                val loopbacks = mutableListOf(
+                    runCatching { InetAddress.getByName("127.0.0.1") }.getOrNull(),
+                    runCatching { InetAddress.getByName("::1") }.getOrNull(),
+                ).filterNotNull()
+                for (loop in loopbacks) {
+                    runCatching {
+                        val extra = ServerSocket().apply {
+                            reuseAddress = true
+                            bind(InetSocketAddress(loop, port))
+                        }
+                        additionalServers = additionalServers + extra
+                        runCatching {
+                            listener.onDebugLog(
+                                "airplay listener ready family=${if (loop is Inet4Address) "IPv4" else "IPv6"} port=${extra.localPort} loopback",
+                            )
+                        }
+                        Thread({ acceptLoop(generation, extra) }, "airplay-accept").apply {
+                            isDaemon = true
+                            start()
+                        }
+                    }.onFailure { error ->
+                        Log.w(TAG, "wired loopback AirPlay listener unavailable at $loop", error)
+                        runCatching {
+                            listener.onDebugLog(
+                                "wired loopback AirPlay listener unavailable at $loop: ${error.message}",
+                            )
+                        }
+                    }
+                }
+            }
             attachStage = "wired mDNS AirPlay advertisement"
             // Best-effort: if the advertisement fails, the attach still stands (the
             // iPhone may already know the endpoint); without it the iPhone keeps
@@ -457,8 +514,12 @@ class CarPlayVpnService : VpnService() {
                 }
             }
         }
-        return "tun tcp6 port=$port listen=$listen synRecv=$synRecv " +
+        val base = "tun tcp6 port=$port listen=$listen synRecv=$synRecv " +
             "established=$established other=$other injectedTcp=$injected"
+        // With the user-space stack active the kernel only sees loopback relay connections,
+        // so established>=1 here means the stack completed the handshake on the iPhone side.
+        val stack = bridge?.userSpaceTcp ?: return base
+        return "$base ${stack.summary()}"
     }
 
     override fun onDestroy() {
